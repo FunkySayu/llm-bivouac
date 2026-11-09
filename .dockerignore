@@ -1,0 +1,5 @@
+# Allowlist, so .env files can never reach a build context.
+*
+!pyproject.toml
+!src
+**/__pycache__
