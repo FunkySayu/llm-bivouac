@@ -114,6 +114,7 @@ services:
       AILAB_REFRESH_PROMPT_SECONDS: "900"
       AILAB_IDLE_TEARDOWN_SECONDS: "1200"
       AILAB_TEARDOWN_DRAIN_SECONDS: "300"
+      AILAB_START_TIMEOUT_SECONDS: "1200"
       AILAB_WEIGHTS_RETENTION_DAYS: "30"
       # Runtime
       AILAB_LISTEN_PORT: "8000"
@@ -125,6 +126,8 @@ services:
       DATABASE_URL: postgresql://ailab:${AILAB_DB_PASSWORD:?}@postgres:5432/ailab
       # OVH
       OVH_API_BASE_URL: https://eu.api.ovh.com/1.0
+      OVH_TOKEN_URL: https://www.ovh.com/auth/oauth2/token
+      OVH_AI_API_URL: https://gra.ai.cloud.ovh.net
       OVH_REGION: GRA
       OVH_PROJECT_ID: ${OVH_PROJECT_ID:?}
       OVH_CLIENT_ID: ${OVH_CLIENT_ID:?}

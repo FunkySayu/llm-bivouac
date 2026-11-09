@@ -1,8 +1,10 @@
-# Every model is served by the custom proxy, which owns the catalog.
+# Every model is served by the custom proxy, which owns the catalog. Routes are
+# listed by name because LiteLLM answers /v1/models for a "*" route from its own
+# cost map, not from the proxy. Add a route for each new catalog entry.
 model_list:
-  - model_name: "*"
+  - model_name: smollm3-3b-q4-cpu
     litellm_params:
-      model: openai/*
+      model: openai/smollm3-3b-q4-cpu
       api_base: http://proxy:8000/v1
       api_key: os.environ/AILAB_PROXY_API_KEY
 

@@ -7,10 +7,21 @@ name = "llm-bivouac"
 version = "0.1.0"
 description = "LLM Bivouac proxy and deployment controller"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "aiohttp==3.14.5",
+    "asyncpg==0.32.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
 
 [project.scripts]
 llm-bivouac-proxy = "llm_bivouac.__main__:main"
+bivouac = "llm_bivouac.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
