@@ -1,0 +1,234 @@
+# LLM Bivouac lab stack, including Open WebUI.
+# Only Open WebUI and ntfy publish host ports, on loopback for the host's nginx;
+# see the network table in the runbook.
+name: ailab
+
+# Services follow the request path, from the browser down to storage.
+services:
+  # Not depending on litellm is deliberate: login must still work if it is down.
+  # Not on egress, which would put it on a network shared with the proxy.
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.13.2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:9652:8080"
+    environment:
+      WEBUI_URL: https://chat.funkysayu.fr
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?}
+      # Models, all through LiteLLM
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_OPENAI_API: "true"
+      OPENAI_API_BASE_URL: http://litellm:4000/v1
+      OPENAI_API_KEY: ${LITELLM_OWUI_KEY:?}
+      ENABLE_FORWARD_USER_INFO_HEADERS: "true"
+      # Authentik OIDC
+      ENABLE_OAUTH_SIGNUP: "true"
+      OAUTH_MERGE_ACCOUNTS_BY_EMAIL: "true"
+      OAUTH_PROVIDER_NAME: Authentik
+      OAUTH_CLIENT_ID: ${OWUI_OAUTH_CLIENT_ID:?}
+      OAUTH_CLIENT_SECRET: ${OWUI_OAUTH_CLIENT_SECRET:?}
+      OPENID_PROVIDER_URL: ${AUTHENTIK_URL:?}/application/o/chat-funkysayu-fr/.well-known/openid-configuration
+      OPENID_REDIRECT_URI: https://chat.funkysayu.fr/oauth/oidc/callback
+      OAUTH_SCOPES: openid email profile
+      # Roles and groups from Authentik
+      ENABLE_OAUTH_ROLE_MANAGEMENT: "true"
+      OAUTH_ROLES_CLAIM: groups
+      OAUTH_ALLOWED_ROLES: openwebui-users,openwebui-admins
+      OAUTH_ADMIN_ROLES: openwebui-admins
+      ENABLE_OAUTH_GROUP_MANAGEMENT: "true"
+      OAUTH_GROUP_CLAIM: groups
+      # Strict SSO, no local login
+      ENABLE_LOGIN_FORM: "false"
+      ENABLE_PASSWORD_AUTH: "false"
+      ENABLE_SIGNUP: "false"
+      ENABLE_PASSWORD_CHANGE_FORM: "false"
+    labels:
+      backup.volumes: open-webui
+      docker-volume-backup.stop-during-backup: ailab  # its SQLite database is unsafe to copy live
+    volumes:
+      - open-webui:/app/backend/data
+    networks:
+      default:
+      clients:
+
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.106.7
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      DATABASE_URL: postgresql://litellm:${LITELLM_DB_PASSWORD:?}@postgres:5432/litellm
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:?}
+      AILAB_PROXY_API_KEY: ${AILAB_PROXY_API_KEY:?}
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request as u; u.urlopen('http://localhost:4000/health/liveliness', timeout=5)
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    networks:
+      core:
+      clients:
+
+  # Not depending on postgres is deliberate: deadlines must still be enforced
+  # if Postgres never becomes healthy. The image is published by
+  # .github/workflows/publish-image.yaml; pin a sha-* or version tag once it
+  # holds real spend.
+  proxy:
+    image: ghcr.io/funkysayu/llm-bivouac-proxy:main
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    pull_policy: always
+    user: "990:990"
+    read_only: true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    environment:
+      # Budget and lifecycle
+      AILAB_BUDGET_POOL_EUR: "100"
+      AILAB_BUDGET_REFUSE_AT_EUR: "90"
+      AILAB_BUDGET_NOTIFY_PERCENT: "50,80,90"
+      AILAB_MAX_GPUS: "4"
+      AILAB_MAX_SPEND_TTL_MULTIPLIER: "2"
+      AILAB_CLI_CONFIRM_EUR_PER_HOUR: "3"
+      AILAB_OWUI_MAX_EUR_PER_HOUR: "6"
+      AILAB_TTL_SECONDS: "3600"
+      AILAB_TTL_WARNING_SECONDS: "600"
+      AILAB_REFRESH_PROMPT_SECONDS: "900"
+      AILAB_IDLE_TEARDOWN_SECONDS: "1200"
+      AILAB_TEARDOWN_DRAIN_SECONDS: "300"
+      AILAB_WEIGHTS_RETENTION_DAYS: "30"
+      # Runtime
+      AILAB_LISTEN_PORT: "8000"
+      AILAB_METRICS_PORT: "9100"
+      AILAB_SOCKET_PATH: /run/ailab/ailab.sock
+      AILAB_STATE_DIR: /state
+      AILAB_PROXY_API_KEY: ${AILAB_PROXY_API_KEY:?}
+      VLLM_API_KEY: ${VLLM_API_KEY:?}
+      DATABASE_URL: postgresql://ailab:${AILAB_DB_PASSWORD:?}@postgres:5432/ailab
+      # OVH
+      OVH_API_BASE_URL: https://eu.api.ovh.com/1.0
+      OVH_REGION: GRA
+      OVH_PROJECT_ID: ${OVH_PROJECT_ID:?}
+      OVH_CLIENT_ID: ${OVH_CLIENT_ID:?}
+      OVH_CLIENT_SECRET: ${OVH_CLIENT_SECRET:?}
+      OVH_S3_ENDPOINT: https://s3.gra.io.cloud.ovh.net
+      OVH_S3_REGION: gra
+      OVH_S3_BUCKET: ${OVH_S3_BUCKET:?}
+      OVH_S3_ACCESS_KEY: ${OVH_S3_ACCESS_KEY:?}
+      OVH_S3_SECRET_KEY: ${OVH_S3_SECRET_KEY:?}
+      OVH_DATASTORE_ALIAS: llm-bivouac-weights
+      # Other services
+      HF_TOKEN: ${HF_TOKEN:?}
+      AUTHENTIK_URL: ${AUTHENTIK_URL:?}
+      AUTHENTIK_API_TOKEN: ${AUTHENTIK_API_TOKEN:?}
+      AUTHENTIK_GROUP: ai-lab
+      AUTHENTIK_CACHE_SECONDS: "60"
+      NTFY_URL: http://ntfy
+      NTFY_TOPIC: ailab
+      NTFY_PUBLISH_TOKEN: ${NTFY_PUBLISH_TOKEN:?}
+    labels:
+      backup.volumes: proxy-state  # no stop label: backups must never pause deadline enforcement
+    volumes:
+      - proxy-state:/state
+      - /run/ailab:/run/ailab
+    networks:
+      core:
+      egress:
+      monitoring:
+        aliases:
+          - ailab-proxy
+
+  ntfy:
+    image: binwiederhier/ntfy:v2.37.2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    command: ["serve"]
+    environment:
+      NTFY_BASE_URL: ${NTFY_BASE_URL:?}
+      NTFY_BEHIND_PROXY: "true"
+      NTFY_AUTH_FILE: /var/lib/ntfy/auth.db
+      NTFY_AUTH_DEFAULT_ACCESS: deny-all
+      NTFY_CACHE_FILE: /var/cache/ntfy/cache.db
+      NTFY_UPSTREAM_BASE_URL: ${NTFY_UPSTREAM_BASE_URL:?}
+    ports:
+      - "127.0.0.1:9653:80"
+    volumes:
+      - ntfy-data:/var/lib/ntfy
+      - ntfy-cache:/var/cache/ntfy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --tries=1 -O - http://localhost:80/v1/health | grep -q '\"healthy\":true'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      core:
+      egress:
+
+  postgres:
+    image: postgres:17.11-alpine
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      AILAB_DB_PASSWORD: ${AILAB_DB_PASSWORD:?}
+      LITELLM_DB_PASSWORD: ${LITELLM_DB_PASSWORD:?}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:?}
+    labels:
+      backup.volumes: pg-dump
+      docker-volume-backup.exec-label: ailab
+      docker-volume-backup.archive-pre: /bin/sh -c 'pg_dumpall -U postgres --clean --if-exists > /dump/ailab.sql'
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - pg-dump:/dump
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      core:
+      monitoring:
+        aliases:
+          - ailab-postgres
+
+networks:
+  core:
+    internal: true
+  egress:
+  clients:
+    name: ailab-clients
+    internal: true
+  monitoring:
+    external: true
+    name: monitoring
+
+volumes:
+  pg-data:
+  pg-dump:
+  proxy-state:
+  ntfy-data:
+  ntfy-cache:
+  open-webui:

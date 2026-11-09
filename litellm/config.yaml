@@ -1,0 +1,13 @@
+# Every model is served by the custom proxy, which owns the catalog.
+model_list:
+  - model_name: "*"
+    litellm_params:
+      model: openai/*
+      api_base: http://proxy:8000/v1
+      api_key: os.environ/AILAB_PROXY_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  # Passes the x-openwebui-* user, chat and message headers on to the proxy.
+  forward_client_headers_to_llm_api: true
