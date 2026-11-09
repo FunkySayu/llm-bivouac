@@ -17,6 +17,9 @@ from typing import Any
 
 SOCKET_PATH = os.environ.get("AILAB_SOCKET_PATH", "/run/ailab/ailab.sock")
 TIMEOUT_SECONDS = 120
+POLL_SECONDS = 3
+# Covers the 5 min drain for running responses and OVH's own deletion time.
+DOWN_WAIT_SECONDS = 600
 
 
 class _UnixConnection(http.client.HTTPConnection):
@@ -30,7 +33,9 @@ class _UnixConnection(http.client.HTTPConnection):
         self.sock.connect(self._path)
 
 
-def call(method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
+def call(
+    method: str, path: str, payload: dict[str, Any] | None = None, *, missing_ok: bool = False
+) -> Any:
     connection = _UnixConnection(SOCKET_PATH)
     try:
         body = json.dumps(payload or {}) if method == "POST" else None
@@ -41,6 +46,8 @@ def call(method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
         sys.exit(f"cannot reach the proxy at {SOCKET_PATH}: {error}")
     finally:
         connection.close()
+    if response.status == 404 and missing_ok:
+        return None
     if response.status >= 400:
         sys.exit(f"error: {data.get('error', response.status)}")
     return data
@@ -50,17 +57,74 @@ def _minutes_left(deadline: float) -> str:
     return f"{max(0, round((deadline - time.time()) / 60))} min"
 
 
+def _phase(instance: dict[str, Any]) -> str:
+    if instance["stop_reason"]:
+        return "stopping"
+    return "ready" if instance["ready"] else "starting"
+
+
+def _progress(instance: dict[str, Any]) -> str:
+    parts = [_phase(instance)]
+    if instance["state"]:
+        parts.append(f"OVH {instance['state']}")
+    if instance["info"]:
+        parts.append(instance["info"])
+    if instance["health"]:
+        parts.append(f"health: {instance['health']}")
+    return " · ".join(parts)
+
+
+def _wait_until_ready(app_id: str) -> None:
+    """Print each change of a starting app. Exits with an error if it fails."""
+    started = time.monotonic()
+    last = None
+    while True:
+        current = call("GET", f"/instance/{app_id}")
+        progress = _progress(current)
+        if progress != last:
+            print(f"[{int(time.monotonic() - started):4d} s] {progress}", flush=True)
+            last = progress
+        if current["stop_reason"]:
+            sys.exit(f"failed: {current['stop_reason']}")
+        if current["ready"]:
+            return
+        time.sleep(POLL_SECONDS)
+
+
+def _wait_until_gone(app_id: str, entry: str) -> None:
+    """Return only once OVH no longer reports the app."""
+    started = time.monotonic()
+    last = None
+    while True:
+        current = call("GET", f"/instance/{app_id}", missing_ok=True)
+        if current is None:
+            return
+        detail = current["stop_detail"]
+        if detail and detail != last:
+            print(f"[{int(time.monotonic() - started):4d} s] {detail}", flush=True)
+            last = detail
+        if time.monotonic() - started >= DOWN_WAIT_SECONDS:
+            sys.exit(
+                f"error: {entry} is NOT confirmed stopped and may still be billing: "
+                f"{detail or 'no answer from OVH yet'}. The proxy keeps retrying."
+            )
+        time.sleep(POLL_SECONDS)
+
+
 def show_status(_: argparse.Namespace) -> None:
-    deployments = call("GET", "/status")["deployments"]
-    if not deployments:
+    instances = call("GET", "/status")["instances"]
+    if not instances:
         print("nothing running")
-    for d in deployments:
+    for i in instances:
         print(
-            f"{d['entry_id']}  {d['status']}  ends in {_minutes_left(d['deadline'])}  "
-            f"{d['price_eur_per_hour']:.3f} €/h  in flight: {d['inflight']}  app: {d['app_id']}"
+            f"{i['entry_id']}  {_phase(i)}  ends in {_minutes_left(i['deadline'])}  "
+            f"{i['eur_per_hour']:.3f} €/h  in flight: {i['inflight']}  "
+            f"instance: {i['instance']}  app: {i['app_id']}"
         )
-        if d["teardown_reason"]:
-            print(f"  teardown: {d['teardown_reason']} ({d['teardown_failures']} failures)")
+        if _phase(i) == "starting":
+            print(f"  progress: {_progress(i)}")
+        if i["stop_reason"]:
+            print(f"  stopping: {i['stop_reason']}")
 
 
 def show_catalog(_: argparse.Namespace) -> None:
@@ -77,36 +141,51 @@ def up(args: argparse.Namespace) -> None:
     if estimate["confirm_required"] and not args.yes:
         if input("Start it? [y/N] ").strip().lower() != "y":
             sys.exit("cancelled")
-    deployment = call(
+    started = call(
         "POST",
         f"/up/{args.entry}",
         {"max_spend_eur": args.max_spend, "keep_when_idle": args.keep_when_idle},
     )
-    print(f"starting: app {deployment['app_id']}, follow with `bivouac status`")
+    print(f"starting: instance {started['instance']}, app {started['app_id']}", flush=True)
+    if args.detach:
+        print("follow with `bivouac status`")
+        return
+    print("waiting until ready (Ctrl-C stops waiting, not the deployment)", flush=True)
+    try:
+        _wait_until_ready(started["app_id"])
+    except KeyboardInterrupt:
+        sys.exit(
+            f"\nstopped waiting: {args.entry} is still starting and billing. "
+            f"Follow it with `bivouac status`, stop it with `bivouac down {args.entry}`."
+        )
+    print(f"{args.entry} is ready")
 
 
 def refresh(args: argparse.Namespace) -> None:
-    deployment = call("POST", f"/refresh/{args.entry}")
-    print(f"{args.entry} now ends in {_minutes_left(deployment['deadline'])}")
+    instance = call("POST", f"/refresh/{args.entry}")
+    print(f"{args.entry} now ends in {_minutes_left(instance['deadline'])}")
 
 
 def down(args: argparse.Namespace) -> None:
-    deployment = call("POST", f"/down/{args.entry}")
-    print(f"tearing down app {deployment['app_id']}")
+    instance = call("POST", f"/down/{args.entry}")
+    print(f"tearing down app {instance['app_id']}, waiting for OVH to confirm", flush=True)
+    try:
+        _wait_until_gone(instance["app_id"], args.entry)
+    except KeyboardInterrupt:
+        sys.exit(
+            f"\nstopped waiting: {args.entry} is NOT confirmed stopped and may still be billing. "
+            "The proxy keeps retrying; check with `bivouac status`."
+        )
+    print(f"stopped: OVH confirms app {instance['app_id']} no longer exists")
 
 
-def budget(args: argparse.Namespace) -> None:
-    if args.action == "history":
-        history = call("GET", "/budget/history")
-        for row in history["by_entry"]:
-            print(f"{row['entry_id']}  {row['spent_eur']:.2f} €")
-        for row in history["by_day"]:
-            print(f"{row['day']}  {row['spent_eur']:.2f} €")
-        return
-    summary = call("POST", "/budget/renew") if args.action == "renew" else call("GET", "/budget")
+def budget(_: argparse.Namespace) -> None:
+    summary = call("GET", "/budget")
     print(
-        f"pool {summary['pool_eur']:.2f} €, spent {summary['spent_eur']:.2f} €, "
-        f"reserved {summary['reserved_eur']:.2f} €"
+        f"OVH reports {summary['used_eur']:.2f} € this month, "
+        f"{summary['reserved_eur']:.2f} € reserved by running apps; "
+        f"pool {summary['pool_eur']:.2f} €, new starts refused past "
+        f"{summary['refuse_at_eur']:.2f} €"
     )
 
 
@@ -120,10 +199,14 @@ def main() -> None:
     commands.add_parser("status", help="list deployments").set_defaults(run=show_status)
     commands.add_parser("catalog", help="list catalog entries").set_defaults(run=show_catalog)
     commands.add_parser("quota", help="show the OVH quota").set_defaults(run=quota)
+    commands.add_parser("budget", help="show this month's spending").set_defaults(run=budget)
 
-    up_parser = commands.add_parser("up", help="start a deployment")
+    up_parser = commands.add_parser("up", help="start a deployment and wait until it is ready")
     up_parser.add_argument("entry")
     up_parser.add_argument("--yes", action="store_true", help="skip the cost confirmation")
+    up_parser.add_argument(
+        "-d", "--detach", action="store_true", help="return without waiting until it is ready"
+    )
     up_parser.add_argument("--max-spend", type=float, help="spending cap in €")
     up_parser.add_argument(
         "--keep-when-idle", action="store_true", help="disable idle teardown, for benchmarks"
@@ -132,15 +215,11 @@ def main() -> None:
 
     for name, run, description in (
         ("refresh", refresh, "extend a deployment by a full TTL"),
-        ("down", down, "stop a deployment"),
+        ("down", down, "stop a deployment and wait until OVH confirms it is gone"),
     ):
         command = commands.add_parser(name, help=description)
         command.add_argument("entry")
         command.set_defaults(run=run)
-
-    budget_parser = commands.add_parser("budget", help="show or renew the budget")
-    budget_parser.add_argument("action", choices=("show", "history", "renew"))
-    budget_parser.set_defaults(run=budget)
 
     args = parser.parse_args()
     args.run(args)

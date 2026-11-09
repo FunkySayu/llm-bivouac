@@ -84,10 +84,9 @@ services:
       core:
       clients:
 
-  # Not depending on postgres is deliberate: deadlines must still be enforced
-  # if Postgres never becomes healthy. The image is published by
-  # .github/workflows/publish-image.yaml; pin a sha-* or version tag once it
-  # holds real spend.
+  # Holds no state of its own: OVH is the source of truth for every app. The
+  # image is published by .github/workflows/publish-image.yaml; pin a sha-* or
+  # version tag once it holds real spend.
   proxy:
     image: ghcr.io/funkysayu/llm-bivouac-proxy:main
     restart: unless-stopped
@@ -108,7 +107,6 @@ services:
       AILAB_MAX_GPUS: "4"
       AILAB_MAX_SPEND_TTL_MULTIPLIER: "2"
       AILAB_CLI_CONFIRM_EUR_PER_HOUR: "3"
-      AILAB_OWUI_MAX_EUR_PER_HOUR: "6"
       AILAB_TTL_SECONDS: "3600"
       AILAB_TTL_WARNING_SECONDS: "600"
       AILAB_REFRESH_PROMPT_SECONDS: "900"
@@ -120,10 +118,8 @@ services:
       AILAB_LISTEN_PORT: "8000"
       AILAB_METRICS_PORT: "9100"
       AILAB_SOCKET_PATH: /run/ailab/ailab.sock
-      AILAB_STATE_DIR: /state
       AILAB_PROXY_API_KEY: ${AILAB_PROXY_API_KEY:?}
       VLLM_API_KEY: ${VLLM_API_KEY:?}
-      DATABASE_URL: postgresql://ailab:${AILAB_DB_PASSWORD:?}@postgres:5432/ailab
       # OVH
       OVH_API_BASE_URL: https://eu.api.ovh.com/1.0
       OVH_TOKEN_URL: https://www.ovh.com/auth/oauth2/token
@@ -147,10 +143,7 @@ services:
       NTFY_URL: http://ntfy
       NTFY_TOPIC: ailab
       NTFY_PUBLISH_TOKEN: ${NTFY_PUBLISH_TOKEN:?}
-    labels:
-      backup.volumes: proxy-state  # no stop label: backups must never pause deadline enforcement
     volumes:
-      - proxy-state:/state
       - /run/ailab:/run/ailab
     networks:
       core:
@@ -231,7 +224,6 @@ networks:
 volumes:
   pg-data:
   pg-dump:
-  proxy-state:
   ntfy-data:
   ntfy-cache:
   open-webui:

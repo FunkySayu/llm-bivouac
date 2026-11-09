@@ -80,6 +80,10 @@ def body(deadline):
     )
 
 
+def test_delete_is_forced_because_ovh_will_not_otherwise_kill_a_running_app():
+    assert '"$apps/$app_id?force=true"' in WATCHDOG
+
+
 def test_deletes_itself_after_the_deadline(sh, tmp_path):
     past = int(time.time()) - 1000
     out = run_watchdog(sh, tmp_path, deadline=past, grace=60, first=body(past))

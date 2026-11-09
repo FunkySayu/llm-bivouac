@@ -1,19 +1,31 @@
-"""Builds the AI Deploy app for a catalog entry, including its self-destruct.
+"""Translates between catalog entries and OVH AI Deploy apps.
 
-AI Deploy has no maximum run time, so each app deletes itself if the proxy (or
-the whole server) disappears. The watchdog re-reads the deadline from the app's
-own label, which is how a refresh reaches it, and keeps the last value it saw
-if OVH's API cannot be reached. The app's ID is not known when it is created,
+OVH is the only record of what is running: everything the proxy must remember
+about an app is written on the app itself, as a label or an environment variable,
+and read back by parse_instance.
+
+AI Deploy has no maximum run time, so each app also deletes itself if the proxy
+(or the whole server) disappears. The watchdog re-reads the deadline from the
+app's own label, which is how a refresh reaches it, and keeps the last value it
+saw if OVH's API cannot be reached. The app's ID is not known when it is created,
 so the watchdog finds itself through the deployment label its token is limited to.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
 
 from .catalog import CatalogEntry
 
 MANAGED_LABEL = "ailab-managed"
 DEPLOYMENT_LABEL = "ailab-deployment"
 DEADLINE_LABEL = "ailab-deadline"
+ENTRY_LABEL = "ailab-entry"
+MAX_SPEND_LABEL = "ailab-max-spend"
+KEEP_WHEN_IDLE_LABEL = "ailab-keep-when-idle"
+TOKEN_ENV = "AILAB_OPERATOR_TOKEN"
 ENGINE_PORT = 8080
 
 # Past this margin after the deadline the proxy has clearly failed to act.
@@ -36,7 +48,7 @@ watchdog() {
     if [ "$(date +%s)" -gt "$((deadline + AILAB_SELF_DESTRUCT_GRACE))" ] && [ -n "$app_id" ]; then
       echo "ailab watchdog: deadline passed, deleting app $app_id" >&2
       curl -fsS --max-time 20 -X DELETE -H "Authorization: Bearer $AILAB_OPERATOR_TOKEN" \
-        "$apps/$app_id" >/dev/null 2>&1
+        "$apps/$app_id?force=true" >/dev/null 2>&1
     fi
     sleep "${AILAB_WATCHDOG_INTERVAL:-60}"
   done
@@ -55,12 +67,59 @@ exec /app/llama-server --host 0.0.0.0 --port "$AILAB_ENGINE_PORT" \
 """
 
 
+@dataclass(frozen=True)
+class Instance:
+    """A managed OVH app, as OVH describes it."""
+
+    app_id: str
+    deployment_id: str
+    entry_id: str
+    state: str | None
+    info: str | None
+    url: str | None
+    created_at: float
+    deadline: float
+    max_spend_eur: float
+    keep_when_idle: bool
+    token: str = field(repr=False)
+
+
+def _number(value: Any) -> float:
+    """A label that cannot be read counts as 0, which stops the app."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def parse_instance(app: dict[str, Any]) -> Instance:
+    spec = app.get("spec", {})
+    status = app.get("status", {})
+    labels = spec.get("labels") or {}
+    env = {variable.get("name"): variable.get("value") for variable in spec.get("envVars") or []}
+    return Instance(
+        app_id=app["id"],
+        deployment_id=labels.get(DEPLOYMENT_LABEL, ""),
+        entry_id=labels.get(ENTRY_LABEL, ""),
+        state=status.get("state"),
+        info=(status.get("info") or {}).get("message"),
+        url=status.get("url"),
+        created_at=datetime.fromisoformat(app["createdAt"]).timestamp(),
+        deadline=_number(labels.get(DEADLINE_LABEL)),
+        max_spend_eur=_number(labels.get(MAX_SPEND_LABEL)),
+        keep_when_idle=labels.get(KEEP_WHEN_IDLE_LABEL) == "true",
+        token=env.get(TOKEN_ENV) or "",
+    )
+
+
 def build_app_spec(
     *,
     deployment_id: str,
     entry: CatalogEntry,
     region: str,
     deadline: int,
+    max_spend_eur: float,
+    keep_when_idle: bool,
     self_destruct_grace: int,
     operator_token: str,
     backend_api_key: str,
@@ -69,7 +128,7 @@ def build_app_spec(
     env = {
         "AILAB_DEADLINE": str(deadline),
         "AILAB_SELF_DESTRUCT_GRACE": str(self_destruct_grace),
-        "AILAB_OPERATOR_TOKEN": operator_token,
+        TOKEN_ENV: operator_token,
         "AILAB_AI_API": ai_api_url,
         "AILAB_DEPLOYMENT": deployment_id,
         "AILAB_DEPLOYMENT_LABEL": DEPLOYMENT_LABEL,
@@ -97,6 +156,9 @@ def build_app_spec(
             MANAGED_LABEL: "true",
             DEPLOYMENT_LABEL: deployment_id,
             DEADLINE_LABEL: str(deadline),
+            ENTRY_LABEL: entry.id,
+            MAX_SPEND_LABEL: f"{max_spend_eur:.4f}",
+            KEEP_WHEN_IDLE_LABEL: "true" if keep_when_idle else "false",
         },
         "envVars": [{"name": name, "value": value} for name, value in env.items()],
     }

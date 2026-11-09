@@ -7,6 +7,7 @@ from typing import Any
 
 import aiohttp
 
+from .app_spec import MANAGED_LABEL, Instance, parse_instance
 from .config import Config
 
 OPERATOR_ROLE = "ai_training_operator"
@@ -88,16 +89,31 @@ class OvhClient:
     async def create_app(self, spec: dict[str, Any]) -> dict[str, Any]:
         return await self._request("POST", "/ai/app", json=spec)
 
-    async def get_app(self, app_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/ai/app/{app_id}")
+    async def get_instance(self, app_id: str) -> Instance | None:
+        """A managed app as OVH sees it now, or None once it no longer exists."""
+        try:
+            app = await self._request("GET", f"/ai/app/{app_id}")
+        except OvhError as error:
+            if error.status == 404:
+                return None
+            raise
+        return None if app["status"].get("state") == "DELETED" else parse_instance(app)
 
     async def list_apps(self, label_selector: str) -> list[dict[str, Any]]:
         return await self._request("GET", "/ai/app", params={"labelSelector": label_selector})
 
+    async def list_instances(self) -> list[Instance]:
+        apps = await self.list_apps(f"{MANAGED_LABEL}=true")
+        return [parse_instance(a) for a in apps if a["status"].get("state") != "DELETED"]
+
     async def delete_app(self, app_id: str) -> None:
-        """Delete an app. An app that is already gone counts as deleted."""
+        """Delete an app, killing it if it runs. An app already gone counts as deleted.
+
+        Without force, OVH does not kill a running app. A successful answer only
+        means the request was accepted: the app is gone once OVH stops reporting it.
+        """
         try:
-            await self._request("DELETE", f"/ai/app/{app_id}")
+            await self._request("DELETE", f"/ai/app/{app_id}", params={"force": "true"})
         except OvhError as error:
             if error.status != 404:
                 raise
@@ -105,8 +121,11 @@ class OvhClient:
     async def set_app_label(self, app_id: str, name: str, value: str) -> None:
         await self._request("PUT", f"/ai/app/{app_id}/label", json={"name": name, "value": value})
 
-    async def create_operator_token(self, name: str, label_selector: str) -> tuple[str, str]:
-        """Create a token limited to the matching apps; returns (id, secret value)."""
+    async def list_tokens(self) -> list[dict[str, Any]]:
+        return await self._request("GET", "/ai/token")
+
+    async def create_operator_token(self, name: str, label_selector: str) -> str:
+        """Create a token limited to the matching apps and return its secret value."""
         token = await self._request(
             "POST",
             "/ai/token",
@@ -117,7 +136,7 @@ class OvhClient:
                 "labelSelector": label_selector,
             },
         )
-        return token["id"], token["status"]["value"]
+        return token["status"]["value"]
 
     async def delete_token(self, token_id: str) -> None:
         try:

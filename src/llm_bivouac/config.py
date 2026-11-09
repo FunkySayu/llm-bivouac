@@ -15,7 +15,6 @@ class Config:
     max_gpus: int
     max_spend_ttl_multiplier: float
     cli_confirm_eur_per_hour: float
-    owui_max_eur_per_hour: float
     ttl_seconds: int
     ttl_warning_seconds: int
     idle_teardown_seconds: int
@@ -24,10 +23,8 @@ class Config:
     listen_port: int
     metrics_port: int
     socket_path: str
-    state_dir: str
     proxy_api_key: str
     backend_api_key: str
-    database_url: str
     ovh_api_base_url: str
     ovh_token_url: str
     ovh_ai_api_url: str
@@ -65,7 +62,6 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         max_gpus=int(need("AILAB_MAX_GPUS")),
         max_spend_ttl_multiplier=float(need("AILAB_MAX_SPEND_TTL_MULTIPLIER")),
         cli_confirm_eur_per_hour=float(need("AILAB_CLI_CONFIRM_EUR_PER_HOUR")),
-        owui_max_eur_per_hour=float(need("AILAB_OWUI_MAX_EUR_PER_HOUR")),
         ttl_seconds=int(need("AILAB_TTL_SECONDS")),
         ttl_warning_seconds=int(need("AILAB_TTL_WARNING_SECONDS")),
         idle_teardown_seconds=int(need("AILAB_IDLE_TEARDOWN_SECONDS")),
@@ -74,10 +70,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         listen_port=int(need("AILAB_LISTEN_PORT")),
         metrics_port=int(need("AILAB_METRICS_PORT")),
         socket_path=need("AILAB_SOCKET_PATH"),
-        state_dir=need("AILAB_STATE_DIR"),
         proxy_api_key=need("AILAB_PROXY_API_KEY"),
         backend_api_key=need("VLLM_API_KEY"),
-        database_url=need("DATABASE_URL"),
         ovh_api_base_url=need("OVH_API_BASE_URL").rstrip("/"),
         ovh_token_url=source.get("OVH_TOKEN_URL", "https://www.ovh.com/auth/oauth2/token"),
         ovh_ai_api_url=source.get("OVH_AI_API_URL", "https://gra.ai.cloud.ovh.net").rstrip("/"),
